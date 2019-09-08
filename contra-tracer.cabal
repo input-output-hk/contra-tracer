@@ -1,11 +1,11 @@
 name:                contra-tracer
 version:             0.1.0.0
-synopsis:            A simple interface for logging, tracing and monitoring
+synopsis:            Capturing observables for logging, tracing and monitoring
 -- description:
 license:             Apache-2.0
 license-files:       LICENSE, NOTICE
-author:              Alexander Vieth
-maintainer:          operations@iohk.io
+author:              Alexander Vieth, Alexander Diemand, Andreas Triantafyllos
+maintainer:          alex@well-typed.com
 copyright:           2019 IOHK
 category:            Logging
 build-type:          Simple
