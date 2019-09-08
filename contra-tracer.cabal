@@ -1,16 +1,20 @@
 name:                contra-tracer
 version:             0.1.0.0
-synopsis:            A simple interface for logging, tracing or monitoring.
+synopsis:            A simple interface for logging, tracing and monitoring
 -- description:
 license:             Apache-2.0
 license-files:       LICENSE, NOTICE
-author:              Neil Davies, Alexander Diemand, Andreas Triantafyllos
+author:              Alexander Vieth
 maintainer:          operations@iohk.io
 copyright:           2019 IOHK
 category:            Logging
 build-type:          Simple
 extra-source-files:  README.md
 cabal-version:       >=1.10
+
+source-repository head
+  type: git
+  location: https://github.com/input-output-hk/contra-tracer
 
 library
   hs-source-dirs:      src
