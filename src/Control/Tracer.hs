@@ -4,9 +4,21 @@ Description : A simple interface for logging, tracing, and monitoring
 Copyright   : (c) IOHK, 2019
 License     : Apache-2.0
 
+=== General usage
+
 'Tracer' is a contravariant functor intended to express the pattern in which
 values of its parameter type are used to produce effects which are prescribed
 by the caller, as in tracing, logging, code instrumentation, etc.
+
+Programs should be written to use as specific a tracer as possible, i.e. to
+take as a parameter a @Tracer m domainSpecificType@. To combine these programs
+into an executable which does meaningful tracing, an implementation of that
+tracing should be used to make a @Tracer probablyIO implementationTracingType@,
+which is 'contramap'ped to fit @Tracer m domainSpecificType@ wherever it is
+needed, for the various @domainSpecificType@s that appear throughout the
+program.
+
+=== An example
 
 This short example shows how a tracer can be deployed, highlighting the use of
 'contramap' to fit a general tracer which writes text to a file, where a
@@ -111,7 +123,9 @@ traceWith :: Tracer m a -> a -> m ()
 traceWith = runTracer
 
 -- | Does nothing. Does not force its argument. Using this tracer effectively
--- "turns off" tracing.
+-- "turns off" tracing. However, the value may still be forced, because this
+-- tracer can still be 'contramap'ped with functions that are strict, such
+-- as by 'condTracing'.
 nullTracer :: Applicative m => Tracer m a
 nullTracer = Tracer $ \_ -> pure ()
 
@@ -152,7 +166,7 @@ stdoutTracer :: (MonadIO m) => Tracer m String
 stdoutTracer = Tracer $ liftIO . putStrLn
 
 -- | Trace strings using 'Debug.Trace.traceM'. This will use stderr. See
--- documentation in that module for more details.
+-- documentation in "Debug.Trace" for more details.
 debugTracer :: (Applicative m) => Tracer m String
 debugTracer = Tracer Debug.Trace.traceM
 
