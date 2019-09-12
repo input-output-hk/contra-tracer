@@ -1,7 +1,8 @@
 {-|
 Module      : Control.Tracer
 Description : A simple interface for logging, tracing, and monitoring
-Copyright   : (c) IOHK, 2019
+Copyright   : (c) Alexander Vieth, 2019
+Maintainer  : aovieth@gmail.com
 License     : Apache-2.0
 
 === General usage

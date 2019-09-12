@@ -1,10 +1,8 @@
 {-|
 Module      : Control.Tracer.Arrow
 Copyright   : (c) Alexander Vieth, 2019
-Licence     : BSD3
+Licence     : Apache-2.0
 Maintainer  : aovieth@gmail.com
-Stability   : experimental
-Portability : non-portable (GHC only)
 -}
 
 {-# LANGUAGE GADTSyntax #-}
