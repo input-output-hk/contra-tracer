@@ -46,10 +46,10 @@ specific tracer which takes domain-specific events is expected.
 >   let eventTracer :: Tracer IO Event
 >       eventTracer = contramap eventToText tracer
 >   actionWithTrace eventTracer
-
 -}
 
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Control.Tracer
     ( Tracer (..)
@@ -60,20 +60,20 @@ module Control.Tracer
     , debugTracer
     -- * Transforming tracers
     , natTracer
-    , contramapM
-    , condTracing
-    , condTracingM
+    , traceMaybe
+    , squelchUnless
     , showTracing
     -- * Re-export of Contravariant
     , Contravariant(..)
     ) where
 
-import           Control.Monad (when, (>=>))
-import           Control.Monad.IO.Class (MonadIO (..))
+import           Control.Category ((>>>))
+import           Control.Arrow ((|||), (&&&), arr)
 import           Data.Functor.Contravariant (Contravariant (..))
-import           Data.Semigroup (Semigroup (..))
-import           Data.Monoid (Monoid (..))
+import           Data.Monoid (Ap (..))
 import           Debug.Trace (traceM)
+
+import qualified Control.Tracer.Arrow as Arrow
 
 -- | This type describes some effect in @m@ which depends upon some value of
 -- type @a@, for which the /output value/ is not of interest (only the effects).
@@ -86,11 +86,12 @@ import           Debug.Trace (traceM)
 -- The actual implementation of such a program will probably work on rather
 -- large, domain-agnostic types like @Text@, @ByteString@, JSON values for
 -- structured logs, etc.
+--
 -- But the call sites which ultimately /invoke/ these implementations will deal
 -- with smaller, domain-specific types that concisely describe events, metrics,
 -- debug information, etc.
 --
--- This difference is reconciled by the 'Contravariant' instance for tracer.
+-- This difference is reconciled by the 'Contravariant' instance for 'Tracer'.
 -- 'Data.Functor.Contravariant.contramap' is used to change the input type of
 -- a tracer. This allows for a more general tracer to be used where a more
 -- specific one is expected.
@@ -105,71 +106,133 @@ import           Debug.Trace (traceM)
 -- >
 -- > traceEventToLogFile :: Tracer m Event
 -- > traceEventToLogFile = contramap eventToText traceTextToLogFile
-newtype Tracer m a = Tracer { runTracer :: a -> m () }
+--
+-- Effectful tracers that actually do interesting stuff can be defined
+-- using 'emit', and composed via 'contramap'.
+--
+-- The 'nullTracer' can be used as a stand-in for any tracer, doing no
+-- side-effects and producing no interesting value.
+--
+-- To deal with branching, the arrow interface on the underlying
+-- 'Control.Tracer.Arrow.Tracer' should be used. Arrow notation can be helpful
+-- here.
+--
+-- For example, a common pattern is to trace only some variants of a sum type.
+--
+-- > data Event = This Int | That Bool
+-- >
+-- > traceOnlyThat :: Tracer m Int -> Tracer m Bool
+-- > traceOnlyThat tr = Tracer $ proc event -> do
+-- >   case event of
+-- >     This i -> use tr  -< i
+-- >     That _ -> squelch -< ()
+-- 
+-- The key point of using the arrow representation we have here is that this
+-- tracer will not necessarily need to force @event@: if the input tracer @tr@
+-- does not force its value, then @event@ will not be forced. To elaborate,
+-- suppose @tr@ is @nullTracer@. Then this expression becomes
+--
+-- > classify (This i) = Left i
+-- > classify (That _) = Right ()
+-- >
+-- > traceOnlyThat tr
+-- > = Tracer $ Pure classify >>> (squelch ||| squelch) >>> Pure (either id id)
+-- > = Tracer $ Pure classify >>> Pure (either (const (Left ())) (const (Right ()))) >>> Pure (either id id)
+-- > = Tracer $ Pure (classify >>> either (const (Left ())) (const (Right ())) >>> either id id)
+--
+-- So that when this tracer is run by 'traceWith' we get
+--
+-- > traceWith (traceOnlyThat tr) x
+-- > = traceWith (Pure _)
+-- > = pure ()
+--
+-- It is _essential_ that the computation of the tracing effects cannot itself
+-- have side-effects, as this would ruin the ability to short-circuit when
+-- it is known that no tracing will be done: the side-effects of a branch
+-- could change the outcome of another branch. This would fly in the face of
+-- a crucial design goal: you can leave your tracer calls in the program so
+-- they do not bitrot, but can also make them zero runtime cost by substituting
+-- 'nullTracer' appropriately.
+newtype Tracer m a = Tracer { runTracer :: Arrow.Tracer (Ap m ()) a () }
 
-instance Contravariant (Tracer m) where
-  contramap f (Tracer g) = Tracer (g . f)
+instance Applicative m => Contravariant (Tracer m) where
+  contramap f tracer = Tracer (arr f >>> use tracer)
 
 -- | @tr1 <> tr2@ will run @tr1@ and then @tr2@ with the same input.
+-- The "semigroupness" of this definition comes from the fact that the
+-- @Ap m ()@s produced by both tracers will be semigroup appened.
 instance Applicative m => Semigroup (Tracer m s) where
-    Tracer a1 <> Tracer a2 = Tracer $ \s -> a1 s *> a2 s
+  Tracer a1 <> Tracer a2 = Tracer (a1 &&& a2 >>> arr discard)
+    where
+    discard :: ((), ()) -> ()
+    discard = const ()
 
+-- | 'nullTracer' is the unit because it produces no effects, i.e. gives
+-- @mempty :: Ap m () = Ap (pure ())@
 instance Applicative m => Monoid (Tracer m s) where
     mappend = (<>)
     mempty  = nullTracer
 
--- | Alias for 'runTracer'. Traces the given value by way of the 'Tracer'.
-traceWith :: Tracer m a -> a -> m ()
-traceWith = runTracer
+traceWith :: Applicative m => Tracer m a -> a -> m ()
+traceWith tr a = case runTracer tr of
+  -- The function is  a -> ()  so there's no point in evaluating it.
+  Arrow.Pure _ -> pure ()
+  Arrow.Emit f -> let (_, ap) = f a in getAp ap
 
--- | Does nothing. Does not force its argument. Using this tracer effectively
--- "turns off" tracing. However, the value may still be forced, because this
--- tracer can still be 'contramap'ped with functions that are strict, such
--- as by 'condTracing'.
+use :: Tracer m a -> Arrow.Tracer (Ap m ()) a ()
+use = runTracer
+
 nullTracer :: Applicative m => Tracer m a
-nullTracer = Tracer $ \_ -> pure ()
+nullTracer = Tracer (arr (const ()))
 
--- | Similar in spirit to 'contramap', but the mapped function is a "Kleisli
--- arrow" (see Control.Arrow from base for further reading, but it's not
--- so important to know the special name). This is basically monadic bind in
--- front of (to the left of) the tracer's effect.
-contramapM :: Monad m
-           => (a -> m b)
-           -> Tracer m b
-           -> Tracer m a
-contramapM f (Tracer tr) = Tracer (f >=> tr)
+emit :: (a -> m ()) -> Tracer m a
+emit f = Tracer $ Arrow.emit $ \a -> Ap (f a)
 
--- | Use a predicate to filter traced values: if it gives false then the
--- tracer will not be run.
+-- | Run a tracer only for the Just variant of a Maybe. If it's Nothing, the
+-- 'nullTracer' is used (no output).
 --
--- > condTracing p tr = Tracer $ \s -> when (p s) (traceWith tr s)
+-- The arrow representation allows for proper laziness: if the tracer parameter
+-- does not produce any tracing effects, then the predicate won't even be
+-- evaluated. Contrast with the simple contravariant representation as
+-- @a -> m ()@, in which the predicate _must_ be forced no matter what,
+-- because it's impossible to know a priori whether that function will not
+-- produce any tracing effects.
 --
-condTracing :: (Monad m) => (a -> Bool) -> Tracer m a -> Tracer m a
-condTracing p tr = Tracer $ \s ->
-    when (p s) (traceWith tr s)
+-- It's written out explicitly for demonstration. Could also use arrow
+-- notation:
+--
+-- > traceMaybe p tr = Tracer $ proc a -> do
+-- >   case k a of
+-- >     Just b  -> use tr        -< b
+-- >     Nothing -> Arrow.squelch -< ()
+--
+traceMaybe :: Applicative m => (a -> Maybe b) -> Tracer m b -> Tracer m a
+traceMaybe k tr = Tracer $ classify >>> (Arrow.squelch ||| use tr)
+  where
+  classify = arr (maybe (Left ()) Right . k)
 
--- | Like 'condTracing' but the "predicate" can do effects.
-condTracingM :: (Monad m) => m (a -> Bool) -> Tracer m a -> Tracer m a
-condTracingM activeP tr = Tracer $ \s -> do
-    active <- activeP
-    when (active s) (traceWith tr s)
+squelchUnless :: Applicative m => (a -> Bool) -> Tracer m a -> Tracer m a
+squelchUnless p = traceMaybe (\a -> if p a then Just a else Nothing)
 
--- | Use a natural transformation to change the monad. This is useful, for
+-- | Use a natural transformation to change the @m@ type. This is useful, for
 -- instance, to use concrete IO tracers in monad transformer stacks that have
 -- IO as their base.
-natTracer :: (forall x . m x -> n x) -> Tracer m s -> Tracer n s
-natTracer nat (Tracer tr) = Tracer (nat . tr)
+natTracer :: forall m n s . (forall x . m x -> n x) -> Tracer m s -> Tracer n s
+natTracer nat (Tracer tr) = Tracer (Arrow.mmap nat' tr)
+  where
+  nat' :: Ap m () -> Ap n ()
+  nat' = Ap . nat . getAp
 
 -- | Trace strings to stdout. Output could be jumbled when this is used from
 -- multiple threads. Consider 'debugTracer' instead.
-stdoutTracer :: (MonadIO m) => Tracer m String
-stdoutTracer = Tracer $ liftIO . putStrLn
+stdoutTracer :: Tracer IO String
+stdoutTracer = emit putStrLn
 
 -- | Trace strings using 'Debug.Trace.traceM'. This will use stderr. See
 -- documentation in "Debug.Trace" for more details.
-debugTracer :: (Applicative m) => Tracer m String
-debugTracer = Tracer Debug.Trace.traceM
+debugTracer :: Applicative m => Tracer m String
+debugTracer = emit traceM
 
 -- | Any tracer on strings is a tracer on types which are Show.
-showTracing :: (Show a) => Tracer m String -> Tracer m a
+showTracing :: (Applicative m, Show a) => Tracer m String -> Tracer m a
 showTracing = contramap show
