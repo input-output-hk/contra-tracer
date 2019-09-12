@@ -21,6 +21,10 @@ import Control.Category
 -- | A pure function which may also produce some side-channel value of type
 -- @m@. When @m@ is a semigroup, we get an arrow. When it's a monoid, we get
 -- an arrow with choice.
+--
+-- It is deliberately not ArrowApply, ArrowZero, or ArrowPlus.
+-- ArrowApply is not compatible with statically knowing whether a Tracer
+-- will emit anything.
 data Tracer m a b where
   Pure :: (a -> b     ) -> Tracer m a b
   Emit :: (a -> (b, m)) -> Tracer m a b
@@ -71,6 +75,10 @@ instance Monoid m => ArrowChoice (Tracer m) where
   Emit l +++ Emit r = Emit $ \choice -> case choice of
     Left  a -> let (b, m) = l a in (Left  b, m)
     Right a -> let (b, m) = r a in (Right b, m)
+
+instance Semigroup m => ArrowLoop (Tracer m) where
+  loop (Pure f) = Pure $ \a -> let (b, c)      = f (a, c) in b
+  loop (Emit f) = Emit $ \a -> let ((b, c), m) = f (a, c) in (b, m)
 
 squelch :: Tracer m a ()
 squelch = Pure (const ())
