@@ -5,116 +5,69 @@ Licence     : Apache-2.0
 Maintainer  : aovieth@gmail.com
 -}
 
-{-# LANGUAGE GADTSyntax   #-}
+{-# LANGUAGE GADTs        #-}
 {-# LANGUAGE Arrows       #-}
 {-# LANGUAGE RankNTypes   #-}
 {-# LANGUAGE BangPatterns #-}
 
 module Control.Tracer.Arrow
   ( Tracer (..)
-  , squelch
+  , compute
   , emit
   , effect
-  , mmap
-  , kmap
+  , squelch
+  , nat
   ) where
 
 import Prelude hiding ((.), id)
 import Control.Arrow
 import Control.Category
-import Control.Monad.Fix (MonadFix)
 
--- | A Kleisli arrow in @f@ which may also produce some side-channel value of
--- type @m@. When @m@ is a semigroup, we get an arrow. When it's a monoid, we
--- get an arrow with choice (assuming @f@ is a monad).
---
--- It is deliberately not ArrowApply, ArrowZero, or ArrowPlus.
--- ArrowApply is not compatible with statically knowing whether a Tracer
--- will emit anything.
-data Tracer m f a b where
-  Pure :: Kleisli f a b      -> Tracer m f a b
-  Emit :: Kleisli f a (b, m) -> Tracer m f a b
+data Tracer m a b where
+  -- | An emitting part, followed by a non-emitting part.
+  -- The non-emitting part is there so that later emitting parts can be
+  -- tacked-on later.
+  Emitting   :: Kleisli m a x -> Kleisli m x b -> Tracer m a b
+  -- | No emitting.
+  Squelching :: Kleisli m a b                  -> Tracer m a b
 
-instance (Semigroup m, Monad f) => Category (Tracer m f) where
+squelch :: Applicative m => Tracer m a ()
+squelch = compute (const ())
 
-  id = Pure id
+emit :: Applicative m => (a -> m ()) -> Tracer m a ()
+emit f = Emitting (Kleisli f) (Kleisli (const (pure ())))
 
-  Pure g . Pure f = Pure (g . f)
-  Pure g . Emit f = Emit (first g . f)
-  Emit g . Pure f = Emit (g . f)
-  Emit g . Emit f = Emit $ proc a -> do
-    (b, !m1) <- f -< a
-    (c, !m2) <- g -< b
-    returnA -< (c, (m1 <>) $! m2)
+effect :: (a -> m b) -> Tracer m a b
+effect = Squelching . Kleisli
 
-instance (Semigroup m, Monad f) => Arrow (Tracer m f) where
+compute :: Applicative m => (a -> b) -> Tracer m a b
+compute f = effect (pure . f)
 
-  arr = Pure . arr
+instance Monad m => Category (Tracer m) where
+  id = compute id
+  Squelching l     . Squelching r     = Squelching (l  . r)
+  -- Crucial: the squelching parts stay together. Could also have written
+  --                                  = Emitting   (rp . re)      l
+  -- but that would miss opportunities to skip doing work.
+  Squelching l     . Emitting   re rp = Emitting   re             (l . rp)
+  -- Contrast with the above clause: here the emitting part comes _after_ the
+  -- squelching part, so the squelching part becomes part of the emitting part.
+  Emitting   le lp . Squelching r     = Emitting   (le . r)       lp
+  Emitting   le lp . Emitting   re rp = Emitting   (le . rp . re) lp
 
-  Pure l *** Pure r = Pure $ l *** r
-  Pure l *** Emit r = Emit $ proc (a, a') -> do
-    b        <- l -< a
-    (b', !m) <- r -< a'
-    returnA -< ((b, b'), m)
-  Emit l *** Pure r = Emit $ proc (a, a') -> do
-    (b, !m) <- l -< a
-    b'      <- r -< a'
-    returnA -< ((b, b'), m)
-  Emit l *** Emit r = Emit $ proc (a, a') -> do
-    (b, !m)   <- l -< a
-    (b', !m') <- r -< a'
-    returnA -< ((b, b'), (m <>) $! m')
+instance Monad m => Arrow (Tracer m) where
+  arr = compute
+  Squelching l     *** Squelching r     = Squelching (l  *** r )
+  Squelching l     *** Emitting   re rp = Emitting   (id *** re) (l  *** rp)
+  Emitting   le lp *** Squelching r     = Emitting   (le *** id) (lp *** r )
+  Emitting   le lp *** Emitting   re rp = Emitting   (le *** re) (lp *** rp)
 
+instance Monad m => ArrowChoice (Tracer m) where
+  Squelching l     +++ Squelching r     = Squelching (l +++ r)
+  Squelching l     +++ Emitting   re rp = Emitting   (id +++ re) (l  +++ rp)
+  Emitting   le lp +++ Squelching r     = Emitting   (le +++ id) (lp +++ r )
+  Emitting   le lp +++ Emitting   re rp = Emitting   (le +++ re) (lp +++ rp)
 
-instance (Monoid m, Monad f) => ArrowChoice (Tracer m f) where
-
-  Pure l +++ Pure r = Pure $ l +++ r
-  Pure l +++ Emit r = Emit $ proc choice -> do
-    case choice of
-      Left  b  -> do
-        c <- l -< b
-        returnA -< (Left c, mempty)
-      Right b' -> do
-        (c', !m) <- r -< b'
-        returnA -< (Right c', m)
-  Emit l +++ Pure r = Emit $ proc choice -> do
-    case choice of
-      Left  b  -> do
-        (c, !m) <- l -< b
-        returnA -< (Left c, m)
-      Right b' -> do
-        c' <- r -< b'
-        returnA -< (Right c', mempty)
-  Emit l +++ Emit r = Emit $ proc choice -> do
-    case choice of
-      Left  b  -> do
-        (c, !m) <- l -< b
-        returnA -< (Left c, m)
-      Right b' -> do
-        (c', !m) <- r -< b'
-        returnA -< (Right c', m)
-
-instance (Semigroup m, MonadFix f) => ArrowLoop (Tracer m f) where
-  loop (Pure f) = Pure $ loop f
-  loop (Emit f) = Emit $ loop $ proc (b, d) -> do
-    ((c, m), d') <- f -< (b, d)
-    returnA -< ((c, d'), m)
-
-squelch :: (Monad f) => Tracer m f a ()
-squelch = Pure (arr (const ()))
-
-emit :: (Monad f) => (a -> m) -> Tracer m f a ()
-emit f = Emit (arr (\a -> ((), f a)))
-
-effect :: (a -> f b) -> Tracer m f a b
-effect = Pure . Kleisli
-
-mmap :: (Monad f) => (m -> n) -> Tracer m f a b -> Tracer n f a b
-mmap _ (Pure f) = Pure f
-mmap h (Emit f) = Emit $ proc a -> do
-  (b, m) <- f -< a
-  returnA -< (b, h $! m)
-
-kmap :: (forall x . f x -> g x) -> Tracer m f a b -> Tracer m g a b
-kmap h (Pure (Kleisli k)) = Pure (Kleisli (h . k))
-kmap h (Emit (Kleisli k)) = Emit (Kleisli (h . k))
+nat :: (forall x . m x -> n x) -> Tracer m a b -> Tracer n a b
+nat h (Squelching (Kleisli k))             = Squelching (Kleisli (h . k))
+nat h (Emitting   (Kleisli k) (Kleisli l)) = Emitting   (Kleisli (h . k)) (Kleisli (h . l))

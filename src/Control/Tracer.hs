@@ -66,19 +66,18 @@ module Control.Tracer
     , debugTracer
     -- * Transforming tracers
     , natTracer
+    , Arrow.nat
     , traceMaybe
     , squelchUnless
     , showTracing
-    , Arrow.mmap
-    , Arrow.kmap
     -- * Re-export of Contravariant
     , Contravariant(..)
     ) where
 
-import           Control.Category ((>>>))
 import           Control.Arrow ((|||), (&&&), arr, runKleisli)
+import           Control.Category ((>>>))
+import           Control.Monad (void)
 import           Data.Functor.Contravariant (Contravariant (..))
-import           Data.Monoid (Ap (..))
 import           Debug.Trace (traceM)
 
 import qualified Control.Tracer.Arrow as Arrow
@@ -161,7 +160,7 @@ import qualified Control.Tracer.Arrow as Arrow
 -- a crucial design goal: you can leave your tracer calls in the program so
 -- they do not bitrot, but can also make them zero runtime cost by substituting
 -- 'nullTracer' appropriately.
-newtype Tracer m a = Tracer { runTracer :: Arrow.Tracer (Ap m ()) m a () }
+newtype Tracer m a = Tracer { runTracer :: Arrow.Tracer m a () }
 
 instance Monad m => Contravariant (Tracer m) where
   contramap f tracer = Tracer (arr f >>> use tracer)
@@ -183,26 +182,21 @@ instance Monad m => Monoid (Tracer m s) where
 
 {-# INLINE traceWith #-}
 traceWith :: Monad m => Tracer m a -> a -> m ()
-traceWith tr a = case runTracer tr of
-  -- The function is  a -> m ()  so there's no point in evaluating it.
-  -- There could be side-effects, but they are not to be run, because they
-  -- don't produce any _trace_ effects.
-  Arrow.Pure _ -> pure ()
-  Arrow.Emit f -> do
-    (_, ap) <- runKleisli f a
-    getAp ap
+traceWith tr a = case (runTracer tr) of
+  Arrow.Squelching _    -> pure ()
+  Arrow.Emitting   ep _ -> void (runKleisli ep a)
 
-arrow :: Arrow.Tracer (Ap m ()) m a () -> Tracer m a
+arrow :: Arrow.Tracer m a () -> Tracer m a
 arrow = Tracer
 
-use :: Tracer m a -> Arrow.Tracer (Ap m ()) m a ()
+use :: Tracer m a -> Arrow.Tracer m a ()
 use = runTracer
 
 nullTracer :: Monad m => Tracer m a
-nullTracer = Tracer (arr (const ()))
+nullTracer = Tracer Arrow.squelch
 
-emit :: (Monad m) => (a -> m ()) -> Tracer m a
-emit f = Tracer $ Arrow.emit $ \a -> Ap (f a)
+emit :: Monad m => (a -> m ()) -> Tracer m a
+emit f = Tracer (Arrow.emit f)
 
 -- | Run a tracer only for the Just variant of a Maybe. If it's Nothing, the
 -- 'nullTracer' is used (no output).
@@ -222,7 +216,7 @@ emit f = Tracer $ Arrow.emit $ \a -> Ap (f a)
 -- >     Just b  -> use tr        -< b
 -- >     Nothing -> Arrow.squelch -< ()
 --
-traceMaybe :: (Monad m) => (a -> Maybe b) -> Tracer m b -> Tracer m a
+traceMaybe :: Monad m => (a -> Maybe b) -> Tracer m b -> Tracer m a
 traceMaybe k tr = Tracer $ classify >>> (Arrow.squelch ||| use tr)
   where
   classify = arr (maybe (Left ()) Right . k)
@@ -233,11 +227,8 @@ squelchUnless p = traceMaybe (\a -> if p a then Just a else Nothing)
 -- | Use a natural transformation to change the @m@ type. This is useful, for
 -- instance, to use concrete IO tracers in monad transformer stacks that have
 -- IO as their base.
-natTracer :: forall m n s . (Monad m) => (forall x . m x -> n x) -> Tracer m s -> Tracer n s
-natTracer nat (Tracer tr) = Tracer (Arrow.kmap nat (Arrow.mmap nat' tr))
-  where
-  nat' :: Ap m () -> Ap n ()
-  nat' = Ap . nat . getAp
+natTracer :: forall m n s . (forall x . m x -> n x) -> Tracer m s -> Tracer n s
+natTracer h (Tracer tr) = Tracer (Arrow.nat h tr)
 
 -- | Trace strings to stdout. Output could be jumbled when this is used from
 -- multiple threads. Consider 'debugTracer' instead.
