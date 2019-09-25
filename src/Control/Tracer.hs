@@ -55,6 +55,11 @@ specific tracer which takes domain-specific events is expected.
 module Control.Tracer
     ( Tracer (..)
     , traceWith
+    , arrow
+    , use
+    , Arrow.squelch
+    , Arrow.emit
+    , Arrow.effect
     -- * Simple tracers
     , nullTracer
     , stdoutTracer
@@ -64,12 +69,14 @@ module Control.Tracer
     , traceMaybe
     , squelchUnless
     , showTracing
+    , Arrow.mmap
+    , Arrow.kmap
     -- * Re-export of Contravariant
     , Contravariant(..)
     ) where
 
 import           Control.Category ((>>>))
-import           Control.Arrow ((|||), (&&&), arr)
+import           Control.Arrow ((|||), (&&&), arr, runKleisli)
 import           Data.Functor.Contravariant (Contravariant (..))
 import           Data.Monoid (Ap (..))
 import           Debug.Trace (traceM)
@@ -154,15 +161,15 @@ import qualified Control.Tracer.Arrow as Arrow
 -- a crucial design goal: you can leave your tracer calls in the program so
 -- they do not bitrot, but can also make them zero runtime cost by substituting
 -- 'nullTracer' appropriately.
-newtype Tracer m a = Tracer { runTracer :: Arrow.Tracer (Ap m ()) a () }
+newtype Tracer m a = Tracer { runTracer :: Arrow.Tracer (Ap m ()) m a () }
 
-instance Applicative m => Contravariant (Tracer m) where
+instance Monad m => Contravariant (Tracer m) where
   contramap f tracer = Tracer (arr f >>> use tracer)
 
 -- | @tr1 <> tr2@ will run @tr1@ and then @tr2@ with the same input.
 -- The "semigroupness" of this definition comes from the fact that the
 -- @Ap m ()@s produced by both tracers will be semigroup appened.
-instance Applicative m => Semigroup (Tracer m s) where
+instance Monad m => Semigroup (Tracer m s) where
   Tracer a1 <> Tracer a2 = Tracer (a1 &&& a2 >>> arr discard)
     where
     discard :: ((), ()) -> ()
@@ -170,23 +177,31 @@ instance Applicative m => Semigroup (Tracer m s) where
 
 -- | 'nullTracer' is the unit because it produces no effects, i.e. gives
 -- @mempty :: Ap m () = Ap (pure ())@
-instance Applicative m => Monoid (Tracer m s) where
+instance Monad m => Monoid (Tracer m s) where
     mappend = (<>)
     mempty  = nullTracer
 
-traceWith :: Applicative m => Tracer m a -> a -> m ()
+{-# INLINE traceWith #-}
+traceWith :: Monad m => Tracer m a -> a -> m ()
 traceWith tr a = case runTracer tr of
-  -- The function is  a -> ()  so there's no point in evaluating it.
+  -- The function is  a -> m ()  so there's no point in evaluating it.
+  -- There could be side-effects, but they are not to be run, because they
+  -- don't produce any _trace_ effects.
   Arrow.Pure _ -> pure ()
-  Arrow.Emit f -> let (_, ap) = f a in getAp ap
+  Arrow.Emit f -> do
+    (_, ap) <- runKleisli f a
+    getAp ap
 
-use :: Tracer m a -> Arrow.Tracer (Ap m ()) a ()
+arrow :: Arrow.Tracer (Ap m ()) m a () -> Tracer m a
+arrow = Tracer
+
+use :: Tracer m a -> Arrow.Tracer (Ap m ()) m a ()
 use = runTracer
 
-nullTracer :: Applicative m => Tracer m a
+nullTracer :: Monad m => Tracer m a
 nullTracer = Tracer (arr (const ()))
 
-emit :: (a -> m ()) -> Tracer m a
+emit :: (Monad m) => (a -> m ()) -> Tracer m a
 emit f = Tracer $ Arrow.emit $ \a -> Ap (f a)
 
 -- | Run a tracer only for the Just variant of a Maybe. If it's Nothing, the
@@ -207,19 +222,19 @@ emit f = Tracer $ Arrow.emit $ \a -> Ap (f a)
 -- >     Just b  -> use tr        -< b
 -- >     Nothing -> Arrow.squelch -< ()
 --
-traceMaybe :: Applicative m => (a -> Maybe b) -> Tracer m b -> Tracer m a
+traceMaybe :: (Monad m) => (a -> Maybe b) -> Tracer m b -> Tracer m a
 traceMaybe k tr = Tracer $ classify >>> (Arrow.squelch ||| use tr)
   where
   classify = arr (maybe (Left ()) Right . k)
 
-squelchUnless :: Applicative m => (a -> Bool) -> Tracer m a -> Tracer m a
+squelchUnless :: Monad m => (a -> Bool) -> Tracer m a -> Tracer m a
 squelchUnless p = traceMaybe (\a -> if p a then Just a else Nothing)
 
 -- | Use a natural transformation to change the @m@ type. This is useful, for
 -- instance, to use concrete IO tracers in monad transformer stacks that have
 -- IO as their base.
-natTracer :: forall m n s . (forall x . m x -> n x) -> Tracer m s -> Tracer n s
-natTracer nat (Tracer tr) = Tracer (Arrow.mmap nat' tr)
+natTracer :: forall m n s . (Monad m) => (forall x . m x -> n x) -> Tracer m s -> Tracer n s
+natTracer nat (Tracer tr) = Tracer (Arrow.kmap nat (Arrow.mmap nat' tr))
   where
   nat' :: Ap m () -> Ap n ()
   nat' = Ap . nat . getAp
@@ -231,9 +246,9 @@ stdoutTracer = emit putStrLn
 
 -- | Trace strings using 'Debug.Trace.traceM'. This will use stderr. See
 -- documentation in "Debug.Trace" for more details.
-debugTracer :: Applicative m => Tracer m String
+debugTracer :: Monad m => Tracer m String
 debugTracer = emit traceM
 
 -- | Any tracer on strings is a tracer on types which are Show.
-showTracing :: (Applicative m, Show a) => Tracer m String -> Tracer m a
+showTracing :: (Monad m, Show a) => Tracer m String -> Tracer m a
 showTracing = contramap show
