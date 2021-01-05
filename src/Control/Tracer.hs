@@ -69,14 +69,12 @@ module Control.Tracer
     , Arrow.nat
     , traceMaybe
     , squelchUnless
-    , showTracing
     -- * Re-export of Contravariant
     , Contravariant(..)
     ) where
 
 import           Control.Arrow ((|||), (&&&), arr, runKleisli)
 import           Control.Category ((>>>))
-import           Control.Monad (void)
 import           Data.Functor.Contravariant (Contravariant (..))
 import           Debug.Trace (traceM)
 
@@ -166,36 +164,36 @@ instance Monad m => Contravariant (Tracer m) where
   contramap f tracer = Tracer (arr f >>> use tracer)
 
 -- | @tr1 <> tr2@ will run @tr1@ and then @tr2@ with the same input.
--- The "semigroupness" of this definition comes from the fact that the
--- @Ap m ()@s produced by both tracers will be semigroup appened.
 instance Monad m => Semigroup (Tracer m s) where
   Tracer a1 <> Tracer a2 = Tracer (a1 &&& a2 >>> arr discard)
     where
     discard :: ((), ()) -> ()
     discard = const ()
 
--- | 'nullTracer' is the unit because it produces no effects, i.e. gives
--- @mempty :: Ap m () = Ap (pure ())@
 instance Monad m => Monoid (Tracer m s) where
     mappend = (<>)
     mempty  = nullTracer
 
 {-# INLINE traceWith #-}
+-- | Run a tracer with a given input.
 traceWith :: Monad m => Tracer m a -> a -> m ()
-traceWith tr a = case (runTracer tr) of
-  Arrow.Squelching _    -> pure ()
-  Arrow.Emitting   ep _ -> void (runKleisli ep a)
+traceWith (Tracer tr) a = runKleisli (Arrow.runTracer tr) a
 
+-- | Inverse of 'use'.
 arrow :: Arrow.Tracer m a () -> Tracer m a
 arrow = Tracer
 
+-- | Inverse of 'arrow'. Useful when writing arrow tracers which use a
+-- contravariant tracer (the newtype in this module).
 use :: Tracer m a -> Arrow.Tracer m a ()
 use = runTracer
 
+-- | A tracer which does nothing.
 nullTracer :: Monad m => Tracer m a
 nullTracer = Tracer Arrow.squelch
 
-emit :: Monad m => (a -> m ()) -> Tracer m a
+-- | Create a simple contravariant tracer which runs a given side-effect.
+emit :: Applicative m => (a -> m ()) -> Tracer m a
 emit f = Tracer (Arrow.emit f)
 
 -- | Run a tracer only for the Just variant of a Maybe. If it's Nothing, the
@@ -221,6 +219,7 @@ traceMaybe k tr = Tracer $ classify >>> (Arrow.squelch ||| use tr)
   where
   classify = arr (maybe (Left ()) Right . k)
 
+-- | Uses 'traceMaybe' to give a tracer which emits only if a predicate is true.
 squelchUnless :: Monad m => (a -> Bool) -> Tracer m a -> Tracer m a
 squelchUnless p = traceMaybe (\a -> if p a then Just a else Nothing)
 
@@ -237,9 +236,5 @@ stdoutTracer = emit putStrLn
 
 -- | Trace strings using 'Debug.Trace.traceM'. This will use stderr. See
 -- documentation in "Debug.Trace" for more details.
-debugTracer :: Monad m => Tracer m String
+debugTracer :: Applicative m => Tracer m String
 debugTracer = emit traceM
-
--- | Any tracer on strings is a tracer on types which are Show.
-showTracing :: (Monad m, Show a) => Tracer m String -> Tracer m a
-showTracing = contramap show
