@@ -1,5 +1,5 @@
 {-|
-Module      : 
+Module      : Test.Control.Tracer.Properties
 Description : Various essential properties for Tracer
 Copyright   : (c) Alexander Vieth, 2019
 Licence     : BSD3
