@@ -9,7 +9,7 @@ maintainer:          aovieth@gmail.com
 copyright:           2019-2021 Input Output (Hong Kong) Ltd., 2019-2021 Well-Typed LLP, 2019-2021 Alexander Vieth
 category:            Logging
 build-type:          Simple
-extra-source-files:  README.md
+extra-source-files:  README.md CHANGELOG.md
 cabal-version:       >=1.10
 
 source-repository head
