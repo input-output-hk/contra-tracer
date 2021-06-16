@@ -158,7 +158,7 @@ import qualified Control.Tracer.Arrow as Arrow
 -- a crucial design goal: you can leave your tracer calls in the program so
 -- they do not bitrot, but can also make them zero runtime cost by substituting
 -- 'nullTracer' appropriately.
-newtype Tracer m a = Tracer { runTracer :: Arrow.Tracer m a () }
+newtype Tracer m a = Tracer { runTracer :: Arrow.TracerA m a () }
 
 instance Monad m => Contravariant (Tracer m) where
   contramap f tracer = Tracer (arr f >>> use tracer)
@@ -177,15 +177,15 @@ instance Monad m => Monoid (Tracer m s) where
 {-# INLINE traceWith #-}
 -- | Run a tracer with a given input.
 traceWith :: Monad m => Tracer m a -> a -> m ()
-traceWith (Tracer tr) a = runKleisli (Arrow.runTracer tr) a
+traceWith (Tracer tr) a = runKleisli (Arrow.runTracerA tr) a
 
 -- | Inverse of 'use'.
-arrow :: Arrow.Tracer m a () -> Tracer m a
+arrow :: Arrow.TracerA m a () -> Tracer m a
 arrow = Tracer
 
 -- | Inverse of 'arrow'. Useful when writing arrow tracers which use a
 -- contravariant tracer (the newtype in this module).
-use :: Tracer m a -> Arrow.Tracer m a ()
+use :: Tracer m a -> Arrow.TracerA m a ()
 use = runTracer
 
 -- | A tracer which does nothing.
