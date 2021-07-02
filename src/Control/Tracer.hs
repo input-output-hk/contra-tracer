@@ -64,6 +64,8 @@ module Control.Tracer
     , condTracing
     , condTracingM
     , showTracing
+    , traceTraversable
+    , traceAll
     -- * Re-export of Contravariant
     , Contravariant(..)
     ) where
@@ -73,6 +75,7 @@ import           Control.Monad.IO.Class (MonadIO (..))
 import           Data.Functor.Contravariant (Contravariant (..))
 import           Data.Semigroup (Semigroup (..))
 import           Data.Monoid (Monoid (..))
+import           Data.Foldable (traverse_)
 import           Debug.Trace (traceM)
 
 -- | This type describes some effect in @m@ which depends upon some value of
@@ -108,7 +111,7 @@ import           Debug.Trace (traceM)
 newtype Tracer m a = Tracer { runTracer :: a -> m () }
 
 instance Contravariant (Tracer m) where
-  contramap f (Tracer g) = Tracer (g . f)
+  contramap f = mapTracer (. f)
 
 -- | @tr1 <> tr2@ will run @tr1@ and then @tr2@ with the same input.
 instance Applicative m => Semigroup (Tracer m s) where
@@ -137,7 +140,7 @@ contramapM :: Monad m
            => (a -> m b)
            -> Tracer m b
            -> Tracer m a
-contramapM f (Tracer tr) = Tracer (f >=> tr)
+contramapM f = mapTracer (f >=>)
 
 -- | Use a predicate to filter traced values: if it gives false then the
 -- tracer will not be run.
@@ -154,11 +157,25 @@ condTracingM activeP tr = Tracer $ \s -> do
     active <- activeP
     when (active s) (traceWith tr s)
 
+traceTraversable :: (Applicative m, Foldable t)
+                 => Tracer m a -> Tracer m (t a)
+traceTraversable = mapTracer traverse_
+
+traceAll :: (Applicative m, Traversable t)
+         => (b -> t a) -> Tracer m a -> Tracer m b
+traceAll f = contramap f . traceTraversable
+
+mapTracer :: ((a -> m ()) -> b -> n ())
+          -> Tracer m a -> Tracer n b
+mapTracer f (Tracer tr) = Tracer (f tr)
+
 -- | Use a natural transformation to change the monad. This is useful, for
 -- instance, to use concrete IO tracers in monad transformer stacks that have
 -- IO as their base.
-natTracer :: (forall x . m x -> n x) -> Tracer m s -> Tracer n s
-natTracer nat (Tracer tr) = Tracer (nat . tr)
+natTracer :: (forall x. m x -> n x)
+          -> Tracer m a
+          -> Tracer n a
+natTracer f = mapTracer (f .)
 
 -- | Trace strings to stdout. Output could be jumbled when this is used from
 -- multiple threads. Consider 'debugTracer' instead.
