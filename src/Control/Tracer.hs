@@ -45,7 +45,7 @@ specific tracer which takes domain-specific events is expected.
 > main = do
 >   textTacer <- traceToLogFile "log.txt"
 >   let eventTracer :: Tracer IO Event
->       eventTracer = contramap eventToText tracer
+>       eventTracer = contramap eventToText textTracer
 >   actionWithTrace eventTracer
 -}
 
