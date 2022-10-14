@@ -71,11 +71,12 @@ module Control.Tracer
     , squelchUnless
     -- * Re-export of Contravariant
     , Contravariant(..)
+    , (>$<)
     ) where
 
 import           Control.Arrow ((|||), (&&&), arr, runKleisli)
 import           Control.Category ((>>>))
-import           Data.Functor.Contravariant (Contravariant (..))
+import           Data.Functor.Contravariant (Contravariant (..), (>$<))
 import           Debug.Trace (traceM)
 
 import qualified Control.Tracer.Arrow as Arrow
